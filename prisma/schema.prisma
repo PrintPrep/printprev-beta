@@ -1,0 +1,258 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+//
+// ─── ENUMS ───────────────────────────────────────────────────────────────
+//
+
+enum SubscriptionStatus {
+  ACTIVE
+  INACTIVE
+  PAST_DUE
+  UNPAID
+  CANCELLED
+  EXPIRED
+  TRIALING
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+enum PlanType {
+  FREE
+  MONTHLY
+  YEARLY
+  LIFETIME
+}
+
+//
+// ─── USER & USER STATUS ─────────────────────────────────────────────────
+//
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  name      String?
+  role      String?
+  createdAt DateTime @default(now())
+  isPro     Boolean  @default(false)
+
+  projects      Project[]
+  uploads       PdfFile[]       @relation("UploadedBy")
+  pdfOps        PdfOperations[] @relation("RequestedBy")
+  payments      Payment[]
+  subscriptions Subscription[]
+  auditLogs     AuditLog[]
+  userStatus    UserStatus?
+
+  @@index([email])
+}
+
+model UserStatus {
+  id                  String   @id @default(uuid())
+  userid              String   @unique
+  planType            PlanType @default(FREE)
+  storageUsed         BigInt   @default(0)
+  storageLimit        BigInt   @default(1073741824)
+  filesUploaded       Int      @default(0)
+  maxFilesPerMonth    Int      @default(10)
+  canUseAdvancedTools Boolean  @default(false)
+  canRemoveWatermark  Boolean  @default(false)
+  canBulkProcess      Boolean  @default(false)
+
+  user User @relation(fields: [userid], references: [id], onDelete: Cascade)
+
+  @@map("user_status")
+}
+
+//
+// ─── PROJECTS ───────────────────────────────────────────────────────────
+//
+
+model Project {
+  id        String   @id @default(uuid())
+  userid    String?
+  name      String
+  createdAt DateTime @default(now())
+
+  user       User?           @relation(fields: [userid], references: [id], onDelete: Cascade)
+  files      ProjectFile[]
+  operations PdfOperations[]
+
+  @@index([userid])
+}
+
+//
+// ─── PDF FILES ──────────────────────────────────────────────────────────
+//
+
+model PdfFile {
+  id              String   @id @default(uuid())
+  original_name   String
+  storage_url     String
+  file_size_in_kb Int?
+  page_count      Int?
+  uploaded_by_id  String?
+  created_at      DateTime @default(now())
+  sha256          String?
+  page_type       String?
+
+  uploadedBy   User?                  @relation("UploadedBy", fields: [uploaded_by_id], references: [id], onDelete: SetNull)
+  operations   PdfFilePdfOperations[]
+  projectFiles ProjectFile[]
+
+  @@index([uploaded_by_id])
+}
+
+//
+// ─── PDF OPERATIONS ─────────────────────────────────────────────────────
+//
+
+model PdfOperations {
+  id             String    @id @default(uuid())
+  job_type       String
+  params         Json?
+  requestedby_id String?
+  project_id     String?
+  status         String?
+  created_at     DateTime  @default(now())
+  completed_at   DateTime?
+
+  requestedBy User?                  @relation("RequestedBy", fields: [requestedby_id], references: [id], onDelete: SetNull)
+  project     Project?               @relation(fields: [project_id], references: [id], onDelete: SetNull)
+  pdfFiles    PdfFilePdfOperations[]
+  jobs        Job[]
+
+  @@index([requestedby_id])
+  @@index([project_id])
+}
+
+//
+// ─── PROJECT ↔ FILE (JOIN TABLE) ───────────────────────────────────────
+//
+
+model ProjectFile {
+  project_id  String
+  pdf_file_id String
+  is_final    Boolean @default(false)
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  pdfFile PdfFile @relation(fields: [pdf_file_id], references: [id], onDelete: Cascade)
+
+  @@id([project_id, pdf_file_id])
+}
+
+//
+// ─── PDF FILE ↔ OPERATIONS (JOIN TABLE) ────────────────────────────────
+//
+// Kept ID field because you store: role + order_index
+
+model PdfFilePdfOperations {
+  id                String  @id @default(uuid())
+  pdf_operations_id String
+  pdf_file_id       String
+  role              String?
+  order_index       Int?
+
+  pdfOperations PdfOperations @relation(fields: [pdf_operations_id], references: [id], onDelete: Cascade)
+  pdfFile       PdfFile       @relation(fields: [pdf_file_id], references: [id], onDelete: Cascade)
+
+  @@index([pdf_operations_id])
+  @@index([pdf_file_id])
+}
+
+//
+// ─── SUBSCRIPTIONS ──────────────────────────────────────────────────────
+//
+
+model Subscription {
+  id                String             @id @default(uuid())
+  userid            String?
+  provider          String?
+  subscriptionId    String?            @unique
+  variantId         String?
+  status            SubscriptionStatus @default(INACTIVE)
+  planType          PlanType           @default(FREE)
+  currentPeriodEnd  DateTime?
+  cancelAtPeriodEnd Boolean            @default(false)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  user     User?     @relation(fields: [userid], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  @@index([userid])
+}
+
+//
+// ─── PAYMENTS ───────────────────────────────────────────────────────────
+//
+
+model Payment {
+  id               String        @id @default(uuid())
+  userid           String?
+  provider         String        @default("lemon_squeezy")
+  providerChargeId String?       @unique
+  subscriptionId   String?
+  amountCents      Int?
+  status           PaymentStatus @default(PENDING)
+  currency         String        @default("USD")
+  paymentMethod    String?
+  paidAt           DateTime?
+  createdAt        DateTime      @default(now())
+
+  user         User?         @relation(fields: [userid], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@index([userid])
+  @@index([subscriptionId])
+}
+
+//
+// ─── AUDIT LOG ──────────────────────────────────────────────────────────
+//
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  action     String?
+  resource   String?
+  details    Json?
+  created_at DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+}
+
+//
+// ─── JOBS (PROCESSING QUEUE) ───────────────────────────────────────────
+//
+
+model Job {
+  id           String    @id @default(uuid())
+  operation_id String
+  status       String?
+  attempts     Int       @default(0)
+  workerid     String?
+  started_at   DateTime?
+  finished_at  DateTime?
+  error        String?
+  created_at   DateTime  @default(now())
+
+  operation PdfOperations @relation(fields: [operation_id], references: [id], onDelete: Cascade)
+
+  @@index([operation_id])
+}
